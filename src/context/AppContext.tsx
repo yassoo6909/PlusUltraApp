@@ -1,7 +1,11 @@
 // src/context/AppContext.tsx
-// Ajout du système de programmes : Program > Day > Exercise > Sets cibles.
+// Ajout de la persistance AsyncStorage : programs, activeProgramId, activeDayId,
+// activeExerciseIndex et energyLevel survivent maintenant au redémarrage de l'app.
+// Le reste (screen, painArea, resting, currentExercise en cours) reste volatile,
+// car ce sont des états de session, pas des données à conserver entre les lancements.
 
-import React, { createContext, useContext, useReducer, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useEffect, useRef, ReactNode } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type SetItem = {
   id: number;
@@ -19,7 +23,6 @@ export type CurrentExercise = {
   sets: SetItem[];
 };
 
-// --- Nouveau : structure de programme ---
 export type ExerciseTemplate = {
   name: string;
   muscleGroup: string;
@@ -29,13 +32,13 @@ export type ExerciseTemplate = {
 
 export type ProgramDay = {
   id: string;
-  label: string; // ex: "Pull · Sèche J3"
+  label: string;
   exercises: ExerciseTemplate[];
 };
 
 export type Program = {
   id: string;
-  name: string; // ex: "Push / Pull / Legs — Sèche"
+  name: string;
   days: ProgramDay[];
 };
 
@@ -51,6 +54,8 @@ type AppState = {
   activeProgramId: string | null;
   activeDayId: string | null;
   activeExerciseIndex: number;
+
+  isHydrated: boolean; // true une fois le state relu depuis AsyncStorage
 };
 
 type Action =
@@ -66,7 +71,21 @@ type Action =
   | { type: 'DELETE_PROGRAM'; payload: string }
   | { type: 'SET_ACTIVE_PROGRAM'; payload: string }
   | { type: 'LOAD_WORKOUT_DAY'; payload: { programId: string; dayId: string; exerciseIndex?: number } }
-  | { type: 'NEXT_EXERCISE_IN_DAY' };
+  | { type: 'NEXT_EXERCISE_IN_DAY' }
+  | { type: 'HYDRATE'; payload: Partial<AppState> };
+
+const STORAGE_KEY = '@plusultra/persisted_state_v1';
+
+// Clés du state qui doivent être sauvegardées sur disque.
+// On exclut volontairement screen/painArea/resting/currentExercise/isHydrated :
+// ce sont des états de session, pas des données de progression durable.
+const PERSISTED_KEYS: (keyof AppState)[] = [
+  'programs',
+  'activeProgramId',
+  'activeDayId',
+  'activeExerciseIndex',
+  'energyLevel',
+];
 
 function buildCurrentExercise(template: ExerciseTemplate): CurrentExercise {
   return {
@@ -118,10 +137,15 @@ const initialState: AppState = {
   activeProgramId: defaultProgram.id,
   activeDayId: defaultProgram.days[0].id,
   activeExerciseIndex: 0,
+
+  isHydrated: false,
 };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case 'HYDRATE':
+      return { ...state, ...action.payload, isHydrated: true };
+
     case 'NAVIGATE':
       return { ...state, screen: action.payload };
 
@@ -213,7 +237,7 @@ function reducer(state: AppState, action: Action): AppState {
 
       const nextIndex = state.activeExerciseIndex + 1;
       const template = day.exercises[nextIndex];
-      if (!template) return state; // dernier exercice du jour déjà atteint
+      if (!template) return state;
 
       return {
         ...state,
@@ -236,6 +260,51 @@ const AppContext = createContext<AppContextType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const hasHydrated = useRef(false);
+
+  // Lecture d'AsyncStorage une seule fois au montage de l'app.
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as Partial<AppState>;
+          dispatch({ type: 'HYDRATE', payload: parsed });
+        } else {
+          dispatch({ type: 'HYDRATE', payload: {} });
+        }
+      } catch (err) {
+        console.warn('Erreur lecture AsyncStorage, valeurs par défaut utilisées', err);
+        dispatch({ type: 'HYDRATE', payload: {} });
+      } finally {
+        hasHydrated.current = true;
+      }
+    })();
+  }, []);
+
+  // Sauvegarde automatique dès qu'une clé persistée change, une fois l'hydratation initiale faite.
+  // On évite d'écrire pendant le tout premier rendu (avant HYDRATE) pour ne pas écraser
+  // les données sauvegardées avec le state par défaut.
+  useEffect(() => {
+    if (!state.isHydrated) return;
+
+    const toPersist: Partial<AppState> = {};
+    for (const key of PERSISTED_KEYS) {
+      (toPersist as any)[key] = state[key];
+    }
+
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toPersist)).catch((err) => {
+      console.warn('Erreur sauvegarde AsyncStorage', err);
+    });
+  }, [
+    state.isHydrated,
+    state.programs,
+    state.activeProgramId,
+    state.activeDayId,
+    state.activeExerciseIndex,
+    state.energyLevel,
+  ]);
+
   return (
     <AppContext.Provider value={{ state, dispatch }}>
       {children}
