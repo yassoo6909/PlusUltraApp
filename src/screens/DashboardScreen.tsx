@@ -1,95 +1,160 @@
 // src/screens/DashboardScreen.tsx
-// Le LinearGradient local est retiré : le fond est désormais porté par AppNavigator
-// pour que le dégradé soit continu jusque sous la tab bar, sans raccord visible.
-// Remplace le <LinearGradient> racine par une simple <View transparente.
+// Dashboard connecté à sessionHistory : tonnage 7j/30j, tendance RPE, dernière séance, régularité.
 
-import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, SafeAreaView, StatusBar, StyleSheet } from 'react-native';
+import React, { useMemo } from 'react';
+import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { colors, radius, spacing, type } from '../theme/colors';
-import { useAppContext } from '../context/AppContext';
+import { useAppContext, WorkoutSession } from '../context/AppContext';
 import OneForAllField from '../components/OneForAllField';
 
+function daysAgo(iso: string): number {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  return diffMs / (1000 * 60 * 60 * 24);
+}
+
+function formatRelativeDate(iso: string): string {
+  const d = daysAgo(iso);
+  if (d < 1) return "Aujourd'hui";
+  if (d < 2) return 'Hier';
+  return `Il y a ${Math.floor(d)} jours`;
+}
+
+function computeRpeTrend(sessions: WorkoutSession[]): { trend: 'up' | 'down' | 'flat'; delta: number } {
+  const withRpe = sessions.filter((s) => s.averageRpe !== null).slice(0, 6);
+  if (withRpe.length < 2) return { trend: 'flat', delta: 0 };
+
+  const half = Math.ceil(withRpe.length / 2);
+  const recent = withRpe.slice(0, half);
+  const older = withRpe.slice(half);
+  if (older.length === 0) return { trend: 'flat', delta: 0 };
+
+  const avg = (arr: WorkoutSession[]) =>
+    arr.reduce((sum, s) => sum + (s.averageRpe ?? 0), 0) / arr.length;
+
+  const delta = Math.round((avg(recent) - avg(older)) * 10) / 10;
+  if (Math.abs(delta) < 0.2) return { trend: 'flat', delta };
+  return { trend: delta > 0 ? 'up' : 'down', delta };
+}
+
 export default function DashboardScreen() {
-  const { dispatch } = useAppContext();
+  const { state, dispatch } = useAppContext();
+  const { sessionHistory } = state;
+
+  const stats = useMemo(() => {
+    const last7 = sessionHistory.filter((s) => daysAgo(s.date) <= 7);
+    const last30 = sessionHistory.filter((s) => daysAgo(s.date) <= 30);
+    const last14 = sessionHistory.filter((s) => daysAgo(s.date) <= 14);
+
+    const tonnage7 = Math.round(last7.reduce((sum, s) => sum + s.totalTonnage, 0) * 10) / 10;
+    const tonnage30 = Math.round(last30.reduce((sum, s) => sum + s.totalTonnage, 0) * 10) / 10;
+    const rpeTrend = computeRpeTrend(sessionHistory);
+    const lastSession = sessionHistory[0] ?? null;
+
+    return {
+      tonnage7,
+      tonnage30,
+      sessionsLast14: last14.length,
+      rpeTrend,
+      lastSession,
+    };
+  }, [sessionHistory]);
+
+  const goToHistory = () => dispatch({ type: 'NAVIGATE', payload: 'history' });
+  const goToPrograms = () => dispatch({ type: 'NAVIGATE', payload: 'programs' });
+
+  const trendLabel =
+    stats.rpeTrend.trend === 'up'
+      ? `↑ +${stats.rpeTrend.delta} — fatigue en hausse`
+      : stats.rpeTrend.trend === 'down'
+      ? `↓ ${stats.rpeTrend.delta} — récupération en hausse`
+      : 'Stable';
+
+  const trendColor =
+    stats.rpeTrend.trend === 'up' ? colors.danger : stats.rpeTrend.trend === 'down' ? colors.success : colors.textSecondary;
 
   return (
     <View style={styles.container}>
-      <OneForAllField count={90} />
+      <OneForAllField count={12} />
 
       <SafeAreaView style={styles.safe}>
         <StatusBar barStyle="light-content" />
 
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Symbolisme</Text>
-          <Text style={styles.headerSubtitle}>Objectif sèche · Semaine 4</Text>
-        </View>
-
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-          <View style={styles.heroPill}>
-            <View style={styles.heroTopRow}>
-              <Text style={styles.heroTag}>Statut héroïque</Text>
-              <Text style={styles.heroLevel}>Niv. 28</Text>
-            </View>
-            <Text style={styles.heroTitle}>Symbol of Peace</Text>
-            <Text style={styles.heroMeta}>185,4 tonnes cumulées</Text>
-
-            <View style={styles.progressRow}>
-              <Text style={styles.progressLabel}>142 500 / 150 000 XP</Text>
-              <Text style={styles.progressRemaining}>7 500 avant palier</Text>
-            </View>
-            <View style={styles.progressBar}>
-              <View style={[styles.progressFill, { width: '85%' }]} />
-            </View>
+          <View style={styles.header}>
+            <Text style={styles.greeting}>Plus Ultra</Text>
+            <Text style={styles.headerSubtitle}>Ton suivi de progression</Text>
           </View>
 
-          <TouchableOpacity
-            style={styles.ctaButton}
-            activeOpacity={0.85}
-            onPress={() => dispatch({ type: 'NAVIGATE', payload: 'checkin' })}
-          >
-            <Text style={styles.ctaText}>Lancer le check-in</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.sectionLabel}>Récupération</Text>
-          <View style={styles.pill}>
-            <Text style={styles.cardSubtitle}>Dernière séance · Dos</Text>
-            <View style={styles.statusRow}>
-              <View style={[styles.statusDot, { backgroundColor: colors.success }]} />
-              <Text style={styles.statusText}>Haut du corps</Text>
-              <Text style={[styles.statusValue, { color: colors.success }]}>Prêt</Text>
+          {sessionHistory.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Text style={styles.emptyTitle}>Aucune donnée pour l'instant</Text>
+              <Text style={styles.emptyText}>
+                Termine ta première séance pour voir apparaître ton tonnage et ta progression ici.
+              </Text>
+              <TouchableOpacity style={styles.ctaButton} onPress={goToPrograms}>
+                <Text style={styles.ctaText}>Voir mes programmes</Text>
+              </TouchableOpacity>
             </View>
-            <View style={styles.divider} />
-            <View style={styles.statusRow}>
-              <View style={[styles.statusDot, { backgroundColor: colors.danger }]} />
-              <Text style={styles.statusText}>Genou droit</Text>
-              <Text style={[styles.statusValue, { color: colors.danger }]}>Sensibilité</Text>
-            </View>
-          </View>
+          ) : (
+            <>
+              <View style={styles.metricsGrid}>
+                <View style={styles.metricCard}>
+                  <Text style={styles.metricValue}>{stats.tonnage7.toLocaleString('fr-FR')} kg</Text>
+                  <Text style={styles.metricLabel}>Tonnage · 7 jours</Text>
+                </View>
+                <View style={styles.metricCard}>
+                  <Text style={styles.metricValue}>{stats.tonnage30.toLocaleString('fr-FR')} kg</Text>
+                  <Text style={styles.metricLabel}>Tonnage · 30 jours</Text>
+                </View>
+                <View style={styles.metricCard}>
+                  <Text style={styles.metricValue}>{stats.sessionsLast14}</Text>
+                  <Text style={styles.metricLabel}>Séances · 14 jours</Text>
+                </View>
+                <View style={styles.metricCard}>
+                  <Text style={[styles.metricValue, { color: trendColor, fontSize: 16 }]}>{trendLabel}</Text>
+                  <Text style={styles.metricLabel}>Tendance RPE</Text>
+                </View>
+              </View>
 
-          <Text style={styles.sectionLabel}>Métriques du jour</Text>
-          <View style={styles.metricsRow}>
-            <MetricPill label="Sommeil" value="7h45" />
-            <MetricPill label="Pas" value="9 420" />
-          </View>
-          <View style={styles.metricsRow}>
-            <MetricPill label="Poids" value="76.4 kg" />
-            <MetricPill label="Tonnage" value="48.5 T" />
-          </View>
-          <View style={styles.metricsRow}>
-            <MetricPill label="Calories" value="2 450" highlight />
-            <MetricPill label="RPE moyen" value="8.2" />
-          </View>
+              {stats.lastSession && (
+                <TouchableOpacity style={styles.lastSessionCard} onPress={goToHistory} activeOpacity={0.85}>
+                  <View style={styles.lastSessionHeader}>
+                    <Text style={styles.lastSessionTitle}>Dernière séance</Text>
+                    <Text style={styles.lastSessionDate}>{formatRelativeDate(stats.lastSession.date)}</Text>
+                  </View>
+                  <Text style={styles.lastSessionDay}>{stats.lastSession.dayLabel}</Text>
+                  <Text style={styles.lastSessionProgram}>{stats.lastSession.programName}</Text>
+
+                  <View style={styles.lastSessionMetrics}>
+                    <View style={styles.lastSessionMetric}>
+                      <Text style={styles.lastSessionMetricValue}>
+                        {stats.lastSession.totalTonnage.toLocaleString('fr-FR')} kg
+                      </Text>
+                      <Text style={styles.lastSessionMetricLabel}>Tonnage</Text>
+                    </View>
+                    <View style={styles.lastSessionMetric}>
+                      <Text style={styles.lastSessionMetricValue}>{stats.lastSession.totalValidatedSets}</Text>
+                      <Text style={styles.lastSessionMetricLabel}>Séries</Text>
+                    </View>
+                    <View style={styles.lastSessionMetric}>
+                      <Text style={[styles.lastSessionMetricValue, { color: colors.gold }]}>
+                        {stats.lastSession.averageRpe ?? '—'}
+                      </Text>
+                      <Text style={styles.lastSessionMetricLabel}>RPE moyen</Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.seeAllLink}>Voir tout l'historique →</Text>
+                </TouchableOpacity>
+              )}
+
+              <TouchableOpacity style={styles.ctaButton} onPress={goToPrograms}>
+                <Text style={styles.ctaText}>Démarrer une nouvelle séance</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </ScrollView>
       </SafeAreaView>
-    </View>
-  );
-}
-
-function MetricPill({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-  return (
-    <View style={[styles.metricPill, highlight && styles.metricPillHighlight]}>
-      <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={[styles.metricValue, highlight && { color: colors.gold }]}>{value}</Text>
     </View>
   );
 }
@@ -97,69 +162,69 @@ function MetricPill({ label, value, highlight }: { label: string; value: string;
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
   safe: { flex: 1 },
-  header: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  headerTitle: { ...type.display, color: colors.textPrimary },
-  headerSubtitle: { ...type.caption, color: colors.textSecondary, marginTop: 2 },
-
   scrollContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
 
-  heroPill: {
+  header: { paddingVertical: spacing.md },
+  greeting: { ...type.display, color: colors.textPrimary },
+  headerSubtitle: { ...type.caption, color: colors.textSecondary, marginTop: 2 },
+
+  emptyCard: {
     backgroundColor: colors.pill,
     borderWidth: 1,
     borderColor: colors.pillBorder,
     borderRadius: radius.md,
     padding: spacing.lg,
+    alignItems: 'center',
+    marginTop: spacing.lg,
+  },
+  emptyTitle: { ...type.h2, color: colors.textPrimary, marginBottom: spacing.sm },
+  emptyText: { ...type.caption, color: colors.textSecondary, textAlign: 'center', marginBottom: spacing.lg },
+
+  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', marginTop: spacing.md, gap: spacing.sm },
+  metricCard: {
+    width: '47%',
+    backgroundColor: colors.pill,
+    borderWidth: 1,
+    borderColor: colors.pillBorder,
+    borderRadius: radius.md,
+    padding: spacing.md,
+  },
+  metricValue: { ...type.h1, color: colors.textPrimary },
+  metricLabel: { ...type.caption, color: colors.textMuted, marginTop: 4, fontSize: 11 },
+
+  lastSessionCard: {
+    backgroundColor: colors.pill,
+    borderWidth: 1,
+    borderColor: colors.pillBorder,
+    borderRadius: radius.md,
+    padding: spacing.lg,
+    marginTop: spacing.lg,
+  },
+  lastSessionHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.xs },
+  lastSessionTitle: { ...type.bodyStrong, color: colors.textSecondary, fontSize: 12, textTransform: 'uppercase' },
+  lastSessionDate: { ...type.caption, color: colors.textMuted },
+  lastSessionDay: { ...type.h2, color: colors.textPrimary, marginTop: 4 },
+  lastSessionProgram: { ...type.caption, color: colors.textSecondary, marginBottom: spacing.md },
+
+  lastSessionMetrics: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.12)',
+    borderRadius: radius.sm,
+    paddingVertical: spacing.sm,
     marginBottom: spacing.md,
   },
-  heroTopRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.sm },
-  heroTag: { ...type.label, color: colors.textMuted },
-  heroLevel: { ...type.caption, color: colors.gold, fontWeight: '600' },
-  heroTitle: { ...type.h1, color: colors.textPrimary, marginBottom: 2 },
-  heroMeta: { ...type.body, color: colors.textSecondary, marginBottom: spacing.md },
+  lastSessionMetric: { flex: 1, alignItems: 'center' },
+  lastSessionMetricValue: { ...type.h2, color: colors.textPrimary },
+  lastSessionMetricLabel: { ...type.caption, color: colors.textMuted, marginTop: 2, fontSize: 10 },
 
-  progressRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  progressLabel: { ...type.caption, color: colors.textPrimary },
-  progressRemaining: { ...type.caption, color: colors.gold },
-  progressBar: { height: 5, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 3, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: colors.gold, borderRadius: 3 },
+  seeAllLink: { ...type.bodyStrong, color: colors.gold, textAlign: 'right' },
 
   ctaButton: {
-    backgroundColor: colors.ctaBackground,
+    backgroundColor: colors.gold,
+    borderRadius: radius.md,
     paddingVertical: spacing.md,
-    borderRadius: radius.pill,
     alignItems: 'center',
-    marginBottom: spacing.lg,
+    marginTop: spacing.lg,
   },
-  ctaText: { ...type.h2, color: colors.ctaText },
-
-  sectionLabel: { ...type.label, color: colors.textMuted, marginBottom: spacing.sm, marginTop: spacing.xs },
-
-  pill: {
-    backgroundColor: colors.pill,
-    borderWidth: 1,
-    borderColor: colors.pillBorder,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.lg,
-  },
-  cardSubtitle: { ...type.caption, color: colors.textMuted, marginBottom: spacing.sm },
-  statusRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.xs },
-  statusDot: { width: 7, height: 7, borderRadius: 4, marginRight: spacing.sm },
-  statusText: { ...type.body, color: colors.textPrimary, flex: 1 },
-  statusValue: { ...type.caption, fontWeight: '600' },
-  divider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginVertical: spacing.xs },
-
-  metricsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.sm },
-  metricPill: {
-    flex: 1,
-    backgroundColor: colors.pill,
-    borderWidth: 1,
-    borderColor: colors.pillBorder,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginRight: spacing.sm,
-  },
-  metricPillHighlight: { backgroundColor: colors.pillActive, borderColor: colors.pillActiveBorder },
-  metricLabel: { ...type.caption, color: colors.textMuted, marginBottom: 4 },
-  metricValue: { ...type.mono, color: colors.textPrimary },
+  ctaText: { ...type.bodyStrong, color: '#1a1a1a' },
 });
