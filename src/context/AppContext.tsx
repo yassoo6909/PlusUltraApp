@@ -1,5 +1,7 @@
 // src/context/AppContext.tsx
-// Programmes persistés avec AsyncStorage + création, édition et suppression.
+// Ajout du Profil : identité, préférences (unité, repos par défaut), et un objet
+// healthSync préparé pour le futur branchement Apple Health / Health Connect
+// (nécessitera un Dev Client custom, pas géré ici).
 
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -39,9 +41,64 @@ export type Program = {
   days: ProgramDay[];
 };
 
+export type CompletedExercise = {
+  name: string;
+  muscleGroup: string;
+  validatedSets: number;
+  totalSets: number;
+  tonnage: number;
+  averageRpe: number | null;
+};
+
+export type WorkoutSession = {
+  id: string;
+  date: string;
+  programName: string;
+  dayLabel: string;
+  exercises: CompletedExercise[];
+  totalTonnage: number;
+  totalValidatedSets: number;
+  averageRpe: number | null;
+};
+
+// --- Nouveau : Profil et préférences ---
+export type WeightUnit = 'kg' | 'lb';
+
+export type UserProfile = {
+  displayName: string;
+  level: 'Débutant' | 'Intermédiaire' | 'Avancé';
+  memberSince: string;
+  avatarUri: string | null;
+};
+
+export type UserPreferences = {
+  weightUnit: WeightUnit;
+  defaultRestSeconds: number;
+  defaultEnergyLevel: string;
+};
+
+// Objet préparé pour la future intégration Apple Health / Health Connect.
+// Le toggle est stocké dès maintenant pour ne pas re-designer l'écran Profil
+// quand le vrai module natif (react-native-health) sera ajouté via un Dev Client.
+export type HealthSyncSettings = {
+  enabled: boolean;
+  platform: 'apple_health' | 'health_connect' | null;
+  lastSyncDate: string | null;
+
+
+};
+
 type PersistedState = Pick<
   AppState,
-  'programs' | 'activeProgramId' | 'activeDayId' | 'activeExerciseIndex' | 'energyLevel'
+  | 'programs'
+  | 'activeProgramId'
+  | 'activeDayId'
+  | 'activeExerciseIndex'
+  | 'energyLevel'
+  | 'sessionHistory'
+  | 'profile'
+  | 'preferences'
+  | 'healthSync'
 >;
 
 type AppState = {
@@ -56,6 +113,13 @@ type AppState = {
   activeProgramId: string | null;
   activeDayId: string | null;
   activeExerciseIndex: number;
+
+  sessionHistory: WorkoutSession[];
+  sessionExerciseLog: CompletedExercise[];
+
+  profile: UserProfile;
+  preferences: UserPreferences;
+  healthSync: HealthSyncSettings;
 
   editingProgramId: string | null;
   isHydrated: boolean;
@@ -77,9 +141,18 @@ type Action =
   | { type: 'STOP_EDIT_PROGRAM' }
   | { type: 'LOAD_WORKOUT_DAY'; payload: { programId: string; dayId: string; exerciseIndex?: number } }
   | { type: 'NEXT_EXERCISE_IN_DAY' }
+  | { type: 'DELETE_SESSION'; payload: string }
+  | { type: 'UPDATE_PROFILE'; payload: Partial<UserProfile> }
+  | { type: 'UPDATE_PREFERENCES'; payload: Partial<UserPreferences> }
+  | { type: 'TOGGLE_HEALTH_SYNC'; payload: { platform: HealthSyncSettings['platform'] } }
+  | { type: 'RESET_ALL_DATA' }
   | { type: 'HYDRATE'; payload: Partial<PersistedState> };
 
 const STORAGE_KEY = '@plusultra/persisted_state_v1';
+
+function makeId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
 
 function buildCurrentExercise(template: ExerciseTemplate): CurrentExercise {
   return {
@@ -94,6 +167,31 @@ function buildCurrentExercise(template: ExerciseTemplate): CurrentExercise {
       rpe: s.rpe,
       validated: false,
     })),
+  };
+}
+
+function summarizeExercise(exercise: CurrentExercise): CompletedExercise {
+  const validatedSets = exercise.sets.filter((s) => s.validated);
+  const tonnage = validatedSets.reduce((total, s) => {
+    const weight = parseFloat(s.weight.replace(',', '.')) || 0;
+    const reps = parseFloat(s.reps.replace(',', '.')) || 0;
+    return total + weight * reps;
+  }, 0);
+
+  const rpeValues = validatedSets
+    .map((s) => parseFloat(s.rpe.replace(',', '.')))
+    .filter((value) => !Number.isNaN(value));
+  const averageRpe = rpeValues.length > 0
+    ? Math.round((rpeValues.reduce((sum, v) => sum + v, 0) / rpeValues.length) * 10) / 10
+    : null;
+
+  return {
+    name: exercise.name,
+    muscleGroup: exercise.muscleGroup,
+    validatedSets: validatedSets.length,
+    totalSets: exercise.sets.length,
+    tonnage: Math.round(tonnage * 10) / 10,
+    averageRpe,
   };
 }
 
@@ -131,6 +229,26 @@ const initialState: AppState = {
   activeProgramId: defaultProgram.id,
   activeDayId: defaultProgram.days[0].id,
   activeExerciseIndex: 0,
+
+  sessionHistory: [],
+  sessionExerciseLog: [],
+
+    profile: {
+      displayName: 'Yassine',
+      level: 'Intermédiaire',
+      memberSince: new Date().toISOString(),
+      avatarUri: null,
+    },
+  preferences: {
+    weightUnit: 'kg',
+    defaultRestSeconds: 90,
+    defaultEnergyLevel: 'Plus Ultra',
+  },
+  healthSync: {
+    enabled: false,
+    platform: null,
+    lastSyncDate: null,
+  },
 
   editingProgramId: null,
   isHydrated: false,
@@ -192,8 +310,46 @@ function reducer(state: AppState, action: Action): AppState {
     case 'END_REST':
       return { ...state, resting: false };
 
-    case 'END_WORKOUT':
-      return { ...state, screen: 'dashboard', resting: false };
+    case 'END_WORKOUT': {
+      const currentSummary = summarizeExercise(state.currentExercise);
+      const fullLog =
+        currentSummary.validatedSets > 0
+          ? [...state.sessionExerciseLog, currentSummary]
+          : state.sessionExerciseLog;
+
+      if (fullLog.length === 0) {
+        return { ...state, screen: 'dashboard', resting: false, sessionExerciseLog: [] };
+      }
+
+      const activeProgram = state.programs.find((p) => p.id === state.activeProgramId);
+      const activeDay = activeProgram?.days.find((d) => d.id === state.activeDayId);
+
+      const totalTonnage = Math.round(fullLog.reduce((sum, ex) => sum + ex.tonnage, 0) * 10) / 10;
+      const totalValidatedSets = fullLog.reduce((sum, ex) => sum + ex.validatedSets, 0);
+      const rpeValues = fullLog.map((ex) => ex.averageRpe).filter((v): v is number => v !== null);
+      const averageRpe = rpeValues.length > 0
+        ? Math.round((rpeValues.reduce((sum, v) => sum + v, 0) / rpeValues.length) * 10) / 10
+        : null;
+
+      const session: WorkoutSession = {
+        id: makeId('session'),
+        date: new Date().toISOString(),
+        programName: activeProgram?.name ?? 'Programme',
+        dayLabel: activeDay?.label ?? 'Séance libre',
+        exercises: fullLog,
+        totalTonnage,
+        totalValidatedSets,
+        averageRpe,
+      };
+
+      return {
+        ...state,
+        screen: 'dashboard',
+        resting: false,
+        sessionHistory: [session, ...state.sessionHistory],
+        sessionExerciseLog: [],
+      };
+    }
 
     case 'SAVE_PROGRAM': {
       const exists = state.programs.some((program) => program.id === action.payload.id);
@@ -239,6 +395,7 @@ function reducer(state: AppState, action: Action): AppState {
         activeDayId: dayId,
         activeExerciseIndex: exerciseIndex,
         currentExercise: buildCurrentExercise(template),
+        sessionExerciseLog: exerciseIndex === 0 ? [] : state.sessionExerciseLog,
       };
     }
 
@@ -251,12 +408,54 @@ function reducer(state: AppState, action: Action): AppState {
       const template = day.exercises[nextIndex];
       if (!template) return state;
 
+      const completedExercise = summarizeExercise(state.currentExercise);
+
       return {
         ...state,
         activeExerciseIndex: nextIndex,
         currentExercise: buildCurrentExercise(template),
+        sessionExerciseLog: [...state.sessionExerciseLog, completedExercise],
       };
     }
+
+    case 'DELETE_SESSION':
+      return { ...state, sessionHistory: state.sessionHistory.filter((s) => s.id !== action.payload) };
+
+    case 'UPDATE_PROFILE':
+      return { ...state, profile: { ...state.profile, ...action.payload } };
+
+    case 'UPDATE_PREFERENCES': {
+      const nextPreferences = { ...state.preferences, ...action.payload };
+      return {
+        ...state,
+        preferences: nextPreferences,
+        // Le repos par défaut des préférences alimente aussi restDuration
+        // si aucune séance n'est en cours, pour rester cohérent immédiatement.
+        restDuration: action.payload.defaultRestSeconds ?? state.restDuration,
+      };
+    }
+
+    case 'TOGGLE_HEALTH_SYNC': {
+      // Ceci ne fait que basculer un drapeau local pour l'instant.
+      // Le vrai appel HealthKit/Health Connect sera ajouté avec un Dev Client
+      // (react-native-health / react-native-health-connect) dans une étape dédiée.
+      const enabling = !state.healthSync.enabled;
+      return {
+        ...state,
+        healthSync: {
+          enabled: enabling,
+          platform: enabling ? action.payload.platform : null,
+          lastSyncDate: enabling ? new Date().toISOString() : state.healthSync.lastSyncDate,
+        },
+      };
+    }
+
+    case 'RESET_ALL_DATA':
+      return {
+        ...initialState,
+        profile: state.profile,
+        isHydrated: true,
+      };
 
     default:
       return state;
@@ -300,6 +499,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       activeDayId: state.activeDayId,
       activeExerciseIndex: state.activeExerciseIndex,
       energyLevel: state.energyLevel,
+      sessionHistory: state.sessionHistory,
+      profile: state.profile,
+      preferences: state.preferences,
+      healthSync: state.healthSync,
     };
 
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(dataToPersist)).catch((error) => {
@@ -312,6 +515,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.activeDayId,
     state.activeExerciseIndex,
     state.energyLevel,
+    state.sessionHistory,
+    state.profile,
+    state.preferences,
+    state.healthSync,
   ]);
 
   return (
