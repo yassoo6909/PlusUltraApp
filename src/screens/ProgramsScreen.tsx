@@ -1,9 +1,17 @@
 // src/screens/ProgramsScreen.tsx
-// LinearGradient local retiré : le fond est désormais porté par AppNavigator
-// pour un dégradé continu jusque sous la tab bar. Racine remplacée par une View transparente.
+// Liste, lancement, édition et suppression des programmes.
 
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, SafeAreaView, StatusBar, StyleSheet } from 'react-native';
+import {
+  Alert,
+  View,
+  Text,
+  ScrollView,
+  TouchableOpacity,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
+} from 'react-native';
 import { colors, radius, spacing, type } from '../theme/colors';
 import { useAppContext } from '../context/AppContext';
 import OneForAllField from '../components/OneForAllField';
@@ -15,6 +23,36 @@ export default function ProgramsScreen() {
   const handleStartDay = (programId: string, dayId: string) => {
     dispatch({ type: 'LOAD_WORKOUT_DAY', payload: { programId, dayId } });
     dispatch({ type: 'NAVIGATE', payload: 'checkin' });
+  };
+
+  const handleCreate = () => {
+    dispatch({ type: 'STOP_EDIT_PROGRAM' });
+    dispatch({ type: 'NAVIGATE', payload: 'program-builder' });
+  };
+
+  const handleEdit = (programId: string) => {
+    dispatch({ type: 'START_EDIT_PROGRAM', payload: programId });
+    dispatch({ type: 'NAVIGATE', payload: 'program-builder' });
+  };
+
+  const handleDelete = (programId: string, programName: string) => {
+    if (programs.length === 1) {
+      Alert.alert('Suppression impossible', 'Garde au moins un programme dans ton application.');
+      return;
+    }
+
+    Alert.alert(
+      'Supprimer le programme ?',
+      `« ${programName} » sera supprimé définitivement.`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: () => dispatch({ type: 'DELETE_PROGRAM', payload: programId }),
+        },
+      ]
+    );
   };
 
   return (
@@ -57,11 +95,28 @@ export default function ProgramsScreen() {
                     <Text style={styles.dayArrow}>→</Text>
                   </TouchableOpacity>
                 ))}
+
+                <View style={styles.actionsRow}>
+                  <TouchableOpacity
+                    style={styles.editButton}
+                    onPress={() => handleEdit(program.id)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.editButtonText}>Modifier</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.deleteButton}
+                    onPress={() => handleDelete(program.id, program.name)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.deleteButtonText}>Supprimer</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             );
           })}
 
-          <TouchableOpacity style={styles.createPill} activeOpacity={0.8}>
+          <TouchableOpacity style={styles.createPill} activeOpacity={0.8} onPress={handleCreate}>
             <Text style={styles.createText}>+ Créer un nouveau programme</Text>
           </TouchableOpacity>
         </ScrollView>
@@ -88,7 +143,7 @@ const styles = StyleSheet.create({
   },
   pillActive: { borderColor: colors.pillActiveBorder },
   programHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md },
-  programName: { ...type.h2, color: colors.textPrimary },
+  programName: { ...type.h2, color: colors.textPrimary, flex: 1, marginRight: spacing.sm },
   activeBadge: { backgroundColor: colors.pillActive, paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.sm },
   activeBadgeText: { ...type.caption, color: colors.gold, fontSize: 10, fontWeight: '700' },
 
@@ -103,6 +158,27 @@ const styles = StyleSheet.create({
   dayLabel: { ...type.bodyStrong, color: colors.textPrimary },
   daySub: { ...type.caption, color: colors.textMuted, marginTop: 2 },
   dayArrow: { ...type.h2, color: colors.gold },
+
+  actionsRow: { flexDirection: 'row', marginTop: spacing.md },
+  editButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.pillActiveBorder,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    marginRight: spacing.sm,
+  },
+  editButtonText: { ...type.caption, color: colors.gold, fontWeight: '700' },
+  deleteButton: {
+    borderWidth: 1,
+    borderColor: 'rgba(248, 113, 113, 0.45)',
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+  },
+  deleteButtonText: { ...type.caption, color: colors.danger, fontWeight: '700' },
 
   createPill: {
     borderWidth: 1,

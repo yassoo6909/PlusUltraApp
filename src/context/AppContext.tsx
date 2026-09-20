@@ -1,10 +1,7 @@
 // src/context/AppContext.tsx
-// Ajout de la persistance AsyncStorage : programs, activeProgramId, activeDayId,
-// activeExerciseIndex et energyLevel survivent maintenant au redémarrage de l'app.
-// Le reste (screen, painArea, resting, currentExercise en cours) reste volatile,
-// car ce sont des états de session, pas des données à conserver entre les lancements.
+// Programmes persistés avec AsyncStorage + création, édition et suppression.
 
-import React, { createContext, useContext, useReducer, useEffect, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type SetItem = {
@@ -42,6 +39,11 @@ export type Program = {
   days: ProgramDay[];
 };
 
+type PersistedState = Pick<
+  AppState,
+  'programs' | 'activeProgramId' | 'activeDayId' | 'activeExerciseIndex' | 'energyLevel'
+>;
+
 type AppState = {
   screen: string;
   painArea: string | null;
@@ -55,7 +57,8 @@ type AppState = {
   activeDayId: string | null;
   activeExerciseIndex: number;
 
-  isHydrated: boolean; // true une fois le state relu depuis AsyncStorage
+  editingProgramId: string | null;
+  isHydrated: boolean;
 };
 
 type Action =
@@ -70,22 +73,13 @@ type Action =
   | { type: 'SAVE_PROGRAM'; payload: Program }
   | { type: 'DELETE_PROGRAM'; payload: string }
   | { type: 'SET_ACTIVE_PROGRAM'; payload: string }
+  | { type: 'START_EDIT_PROGRAM'; payload: string }
+  | { type: 'STOP_EDIT_PROGRAM' }
   | { type: 'LOAD_WORKOUT_DAY'; payload: { programId: string; dayId: string; exerciseIndex?: number } }
   | { type: 'NEXT_EXERCISE_IN_DAY' }
-  | { type: 'HYDRATE'; payload: Partial<AppState> };
+  | { type: 'HYDRATE'; payload: Partial<PersistedState> };
 
 const STORAGE_KEY = '@plusultra/persisted_state_v1';
-
-// Clés du state qui doivent être sauvegardées sur disque.
-// On exclut volontairement screen/painArea/resting/currentExercise/isHydrated :
-// ce sont des états de session, pas des données de progression durable.
-const PERSISTED_KEYS: (keyof AppState)[] = [
-  'programs',
-  'activeProgramId',
-  'activeDayId',
-  'activeExerciseIndex',
-  'energyLevel',
-];
 
 function buildCurrentExercise(template: ExerciseTemplate): CurrentExercise {
   return {
@@ -138,6 +132,7 @@ const initialState: AppState = {
   activeDayId: defaultProgram.days[0].id,
   activeExerciseIndex: 0,
 
+  editingProgramId: null,
   isHydrated: false,
 };
 
@@ -201,23 +196,40 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, screen: 'dashboard', resting: false };
 
     case 'SAVE_PROGRAM': {
-      const exists = state.programs.some((p) => p.id === action.payload.id);
+      const exists = state.programs.some((program) => program.id === action.payload.id);
       const programs = exists
-        ? state.programs.map((p) => (p.id === action.payload.id ? action.payload : p))
+        ? state.programs.map((program) => (program.id === action.payload.id ? action.payload : program))
         : [...state.programs, action.payload];
-      return { ...state, programs };
+      return { ...state, programs, editingProgramId: null };
     }
 
-    case 'DELETE_PROGRAM':
-      return { ...state, programs: state.programs.filter((p) => p.id !== action.payload) };
+    case 'DELETE_PROGRAM': {
+      const programs = state.programs.filter((program) => program.id !== action.payload);
+      const wasActive = state.activeProgramId === action.payload;
+      const nextActiveProgram = wasActive ? programs[0] : undefined;
+      return {
+        ...state,
+        programs,
+        activeProgramId: nextActiveProgram?.id ?? state.activeProgramId,
+        activeDayId: nextActiveProgram?.days[0]?.id ?? state.activeDayId,
+        activeExerciseIndex: wasActive ? 0 : state.activeExerciseIndex,
+        editingProgramId: state.editingProgramId === action.payload ? null : state.editingProgramId,
+      };
+    }
 
     case 'SET_ACTIVE_PROGRAM':
       return { ...state, activeProgramId: action.payload };
 
+    case 'START_EDIT_PROGRAM':
+      return { ...state, editingProgramId: action.payload };
+
+    case 'STOP_EDIT_PROGRAM':
+      return { ...state, editingProgramId: null };
+
     case 'LOAD_WORKOUT_DAY': {
       const { programId, dayId, exerciseIndex = 0 } = action.payload;
-      const program = state.programs.find((p) => p.id === programId);
-      const day = program?.days.find((d) => d.id === dayId);
+      const program = state.programs.find((item) => item.id === programId);
+      const day = program?.days.find((item) => item.id === dayId);
       const template = day?.exercises[exerciseIndex];
       if (!template) return state;
 
@@ -231,8 +243,8 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'NEXT_EXERCISE_IN_DAY': {
-      const program = state.programs.find((p) => p.id === state.activeProgramId);
-      const day = program?.days.find((d) => d.id === state.activeDayId);
+      const program = state.programs.find((item) => item.id === state.activeProgramId);
+      const day = program?.days.find((item) => item.id === state.activeDayId);
       if (!day) return state;
 
       const nextIndex = state.activeExerciseIndex + 1;
@@ -260,41 +272,38 @@ const AppContext = createContext<AppContextType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const hasHydrated = useRef(false);
 
-  // Lecture d'AsyncStorage une seule fois au montage de l'app.
   useEffect(() => {
-    (async () => {
+    const hydrate = async () => {
       try {
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw) as Partial<AppState>;
-          dispatch({ type: 'HYDRATE', payload: parsed });
+        const stored = await AsyncStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          dispatch({ type: 'HYDRATE', payload: JSON.parse(stored) as Partial<PersistedState> });
         } else {
           dispatch({ type: 'HYDRATE', payload: {} });
         }
-      } catch (err) {
-        console.warn('Erreur lecture AsyncStorage, valeurs par défaut utilisées', err);
+      } catch (error) {
+        console.warn('Impossible de charger les données locales', error);
         dispatch({ type: 'HYDRATE', payload: {} });
-      } finally {
-        hasHydrated.current = true;
       }
-    })();
+    };
+
+    hydrate();
   }, []);
 
-  // Sauvegarde automatique dès qu'une clé persistée change, une fois l'hydratation initiale faite.
-  // On évite d'écrire pendant le tout premier rendu (avant HYDRATE) pour ne pas écraser
-  // les données sauvegardées avec le state par défaut.
   useEffect(() => {
     if (!state.isHydrated) return;
 
-    const toPersist: Partial<AppState> = {};
-    for (const key of PERSISTED_KEYS) {
-      (toPersist as any)[key] = state[key];
-    }
+    const dataToPersist: PersistedState = {
+      programs: state.programs,
+      activeProgramId: state.activeProgramId,
+      activeDayId: state.activeDayId,
+      activeExerciseIndex: state.activeExerciseIndex,
+      energyLevel: state.energyLevel,
+    };
 
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toPersist)).catch((err) => {
-      console.warn('Erreur sauvegarde AsyncStorage', err);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(dataToPersist)).catch((error) => {
+      console.warn('Impossible de sauvegarder les données locales', error);
     });
   }, [
     state.isHydrated,
@@ -315,7 +324,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 export function useAppContext(): AppContextType {
   const ctx = useContext(AppContext);
   if (!ctx) {
-    throw new Error('useAppContext doit etre utilise a l\'interieur d\'un AppProvider');
+    throw new Error("useAppContext doit etre utilise a l'interieur d'un AppProvider");
   }
   return ctx;
 }
