@@ -1,7 +1,6 @@
 // src/context/AppContext.tsx
-// Ajout du Profil : identité, préférences (unité, repos par défaut), et un objet
-// healthSync préparé pour le futur branchement Apple Health / Health Connect
-// (nécessitera un Dev Client custom, pas géré ici).
+// Ajout des jours de repos dans le cycle des programmes + suivi des repos pris
+// (planifiés ou improvisés) pour le Dashboard. Remplace tout le fichier existant.
 
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,9 +28,12 @@ export type ExerciseTemplate = {
   targetSets: { weight: string; reps: string; rpe: string }[];
 };
 
+// Un jour de programme est soit un jour d'entraînement (exercises non vide),
+// soit un jour de repos explicite (isRestDay = true, exercises ignoré).
 export type ProgramDay = {
   id: string;
   label: string;
+  isRestDay: boolean;
   exercises: ExerciseTemplate[];
 };
 
@@ -61,7 +63,15 @@ export type WorkoutSession = {
   averageRpe: number | null;
 };
 
-// --- Nouveau : Profil et préférences ---
+// --- Nouveau : suivi des jours de repos pris ---
+export type RestLogEntry = {
+  id: string;
+  date: string; // ISO string
+  programName: string | null; // null si repos improvisé hors planning
+  dayLabel: string | null;
+  planned: boolean; // true si c'était un jour de repos prévu au programme, false si improvisé
+};
+
 export type WeightUnit = 'kg' | 'lb';
 
 export type UserProfile = {
@@ -77,15 +87,10 @@ export type UserPreferences = {
   defaultEnergyLevel: string;
 };
 
-// Objet préparé pour la future intégration Apple Health / Health Connect.
-// Le toggle est stocké dès maintenant pour ne pas re-designer l'écran Profil
-// quand le vrai module natif (react-native-health) sera ajouté via un Dev Client.
 export type HealthSyncSettings = {
   enabled: boolean;
   platform: 'apple_health' | 'health_connect' | null;
   lastSyncDate: string | null;
-
-
 };
 
 type PersistedState = Pick<
@@ -94,8 +99,10 @@ type PersistedState = Pick<
   | 'activeProgramId'
   | 'activeDayId'
   | 'activeExerciseIndex'
+  | 'cyclePosition'
   | 'energyLevel'
   | 'sessionHistory'
+  | 'restLog'
   | 'profile'
   | 'preferences'
   | 'healthSync'
@@ -108,14 +115,19 @@ type AppState = {
   restDuration: number;
   energyLevel: string;
   currentExercise: CurrentExercise;
+  showStretchReminder: boolean;
 
   programs: Program[];
   activeProgramId: string | null;
   activeDayId: string | null;
   activeExerciseIndex: number;
+  // Position courante dans le cycle du programme actif (index dans days[]),
+  // avancée à chaque séance terminée ou repos marqué comme pris.
+  cyclePosition: number;
 
   sessionHistory: WorkoutSession[];
   sessionExerciseLog: CompletedExercise[];
+  restLog: RestLogEntry[];
 
   profile: UserProfile;
   preferences: UserPreferences;
@@ -133,6 +145,7 @@ type Action =
   | { type: 'VALIDATE_SET'; payload: number }
   | { type: 'ADD_SET' }
   | { type: 'END_REST' }
+  | { type: 'DISMISS_STRETCH_REMINDER' }
   | { type: 'END_WORKOUT' }
   | { type: 'SAVE_PROGRAM'; payload: Program }
   | { type: 'DELETE_PROGRAM'; payload: string }
@@ -142,6 +155,10 @@ type Action =
   | { type: 'LOAD_WORKOUT_DAY'; payload: { programId: string; dayId: string; exerciseIndex?: number } }
   | { type: 'NEXT_EXERCISE_IN_DAY' }
   | { type: 'DELETE_SESSION'; payload: string }
+  | { type: 'LOG_PLANNED_REST' }
+  | { type: 'LOG_IMPROMPTU_REST' }
+  | { type: 'DELETE_REST_LOG'; payload: string }
+  | { type: 'ADVANCE_CYCLE' }
   | { type: 'UPDATE_PROFILE'; payload: Partial<UserProfile> }
   | { type: 'UPDATE_PREFERENCES'; payload: Partial<UserPreferences> }
   | { type: 'TOGGLE_HEALTH_SYNC'; payload: { platform: HealthSyncSettings['platform'] } }
@@ -202,6 +219,7 @@ const defaultProgram: Program = {
     {
       id: 'pull-j3',
       label: 'Pull · Sèche J3',
+      isRestDay: false,
       exercises: [
         {
           name: 'Tirage Vertical Poitrine',
@@ -214,6 +232,12 @@ const defaultProgram: Program = {
         },
       ],
     },
+    {
+      id: 'repos-j4',
+      label: 'Repos',
+      isRestDay: true,
+      exercises: [],
+    },
   ],
 };
 
@@ -224,21 +248,24 @@ const initialState: AppState = {
   restDuration: 90,
   energyLevel: 'Plus Ultra',
   currentExercise: buildCurrentExercise(defaultProgram.days[0].exercises[0]),
+  showStretchReminder: false,
 
   programs: [defaultProgram],
   activeProgramId: defaultProgram.id,
   activeDayId: defaultProgram.days[0].id,
   activeExerciseIndex: 0,
+  cyclePosition: 0,
 
   sessionHistory: [],
   sessionExerciseLog: [],
+  restLog: [],
 
-    profile: {
-      displayName: 'Yassine',
-      level: 'Intermédiaire',
-      memberSince: new Date().toISOString(),
-      avatarUri: null,
-    },
+  profile: {
+    displayName: 'Yassine',
+    level: 'Intermédiaire',
+    memberSince: new Date().toISOString(),
+    avatarUri: null,
+  },
   preferences: {
     weightUnit: 'kg',
     defaultRestSeconds: 90,
@@ -310,6 +337,9 @@ function reducer(state: AppState, action: Action): AppState {
     case 'END_REST':
       return { ...state, resting: false };
 
+    case 'DISMISS_STRETCH_REMINDER':
+      return { ...state, showStretchReminder: false };
+
     case 'END_WORKOUT': {
       const currentSummary = summarizeExercise(state.currentExercise);
       const fullLog =
@@ -318,7 +348,7 @@ function reducer(state: AppState, action: Action): AppState {
           : state.sessionExerciseLog;
 
       if (fullLog.length === 0) {
-        return { ...state, screen: 'dashboard', resting: false, sessionExerciseLog: [] };
+        return { ...state, screen: 'dashboard', resting: false, showStretchReminder: false, sessionExerciseLog: [] };
       }
 
       const activeProgram = state.programs.find((p) => p.id === state.activeProgramId);
@@ -342,12 +372,19 @@ function reducer(state: AppState, action: Action): AppState {
         averageRpe,
       };
 
+      // La séance terminée fait avancer le cycle vers le jour suivant du programme,
+      // ce qui permet au Dashboard de savoir si demain est un jour de repos.
+      const dayCount = activeProgram?.days.length ?? 1;
+      const nextCyclePosition = (state.cyclePosition + 1) % dayCount;
+
       return {
         ...state,
         screen: 'dashboard',
         resting: false,
+        showStretchReminder: false,
         sessionHistory: [session, ...state.sessionHistory],
         sessionExerciseLog: [],
+        cyclePosition: nextCyclePosition,
       };
     }
 
@@ -369,12 +406,13 @@ function reducer(state: AppState, action: Action): AppState {
         activeProgramId: nextActiveProgram?.id ?? state.activeProgramId,
         activeDayId: nextActiveProgram?.days[0]?.id ?? state.activeDayId,
         activeExerciseIndex: wasActive ? 0 : state.activeExerciseIndex,
+        cyclePosition: wasActive ? 0 : state.cyclePosition,
         editingProgramId: state.editingProgramId === action.payload ? null : state.editingProgramId,
       };
     }
 
     case 'SET_ACTIVE_PROGRAM':
-      return { ...state, activeProgramId: action.payload };
+      return { ...state, activeProgramId: action.payload, cyclePosition: 0 };
 
     case 'START_EDIT_PROGRAM':
       return { ...state, editingProgramId: action.payload };
@@ -386,7 +424,9 @@ function reducer(state: AppState, action: Action): AppState {
       const { programId, dayId, exerciseIndex = 0 } = action.payload;
       const program = state.programs.find((item) => item.id === programId);
       const day = program?.days.find((item) => item.id === dayId);
-      const template = day?.exercises[exerciseIndex];
+      if (!day || day.isRestDay) return state;
+
+      const template = day.exercises[exerciseIndex];
       if (!template) return state;
 
       return {
@@ -415,11 +455,53 @@ function reducer(state: AppState, action: Action): AppState {
         activeExerciseIndex: nextIndex,
         currentExercise: buildCurrentExercise(template),
         sessionExerciseLog: [...state.sessionExerciseLog, completedExercise],
+        // Rappel d'étirements sobre affiché à chaque transition d'exercice.
+        showStretchReminder: true,
       };
     }
 
     case 'DELETE_SESSION':
       return { ...state, sessionHistory: state.sessionHistory.filter((s) => s.id !== action.payload) };
+
+    case 'LOG_PLANNED_REST': {
+      const activeProgram = state.programs.find((p) => p.id === state.activeProgramId);
+      const activeDay = activeProgram?.days[state.cyclePosition];
+      const dayCount = activeProgram?.days.length ?? 1;
+
+      const entry: RestLogEntry = {
+        id: makeId('rest'),
+        date: new Date().toISOString(),
+        programName: activeProgram?.name ?? null,
+        dayLabel: activeDay?.label ?? 'Repos',
+        planned: true,
+      };
+
+      return {
+        ...state,
+        restLog: [entry, ...state.restLog],
+        cyclePosition: (state.cyclePosition + 1) % dayCount,
+      };
+    }
+
+    case 'LOG_IMPROMPTU_REST': {
+      const entry: RestLogEntry = {
+        id: makeId('rest'),
+        date: new Date().toISOString(),
+        programName: null,
+        dayLabel: null,
+        planned: false,
+      };
+      return { ...state, restLog: [entry, ...state.restLog] };
+    }
+
+    case 'DELETE_REST_LOG':
+      return { ...state, restLog: state.restLog.filter((r) => r.id !== action.payload) };
+
+    case 'ADVANCE_CYCLE': {
+      const activeProgram = state.programs.find((p) => p.id === state.activeProgramId);
+      const dayCount = activeProgram?.days.length ?? 1;
+      return { ...state, cyclePosition: (state.cyclePosition + 1) % dayCount };
+    }
 
     case 'UPDATE_PROFILE':
       return { ...state, profile: { ...state.profile, ...action.payload } };
@@ -429,16 +511,11 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         preferences: nextPreferences,
-        // Le repos par défaut des préférences alimente aussi restDuration
-        // si aucune séance n'est en cours, pour rester cohérent immédiatement.
         restDuration: action.payload.defaultRestSeconds ?? state.restDuration,
       };
     }
 
     case 'TOGGLE_HEALTH_SYNC': {
-      // Ceci ne fait que basculer un drapeau local pour l'instant.
-      // Le vrai appel HealthKit/Health Connect sera ajouté avec un Dev Client
-      // (react-native-health / react-native-health-connect) dans une étape dédiée.
       const enabling = !state.healthSync.enabled;
       return {
         ...state,
@@ -498,8 +575,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       activeProgramId: state.activeProgramId,
       activeDayId: state.activeDayId,
       activeExerciseIndex: state.activeExerciseIndex,
+      cyclePosition: state.cyclePosition,
       energyLevel: state.energyLevel,
       sessionHistory: state.sessionHistory,
+      restLog: state.restLog,
       profile: state.profile,
       preferences: state.preferences,
       healthSync: state.healthSync,
@@ -514,8 +593,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.activeProgramId,
     state.activeDayId,
     state.activeExerciseIndex,
+    state.cyclePosition,
     state.energyLevel,
     state.sessionHistory,
+    state.restLog,
     state.profile,
     state.preferences,
     state.healthSync,

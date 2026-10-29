@@ -1,11 +1,11 @@
 // src/screens/ProgramBuilderScreen.tsx
-// Création et édition d'un programme : nom + jours + exercices + séries cibles.
+// Version complète et autonome : création/édition d'un programme avec jours
+// d'entraînement ET jours de repos explicites (isRestDay). Remplace tout le
+// fichier existant.
 
-import React, { useEffect, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -16,113 +16,99 @@ import {
   View,
 } from 'react-native';
 import { colors, radius, spacing, type } from '../theme/colors';
-import { ExerciseTemplate, Program, ProgramDay, useAppContext } from '../context/AppContext';
+import { useAppContext, Program, ProgramDay, ExerciseTemplate } from '../context/AppContext';
 import OneForAllField from '../components/OneForAllField';
 
-type DraftDay = {
-  id: string;
-  label: string;
-  exercises: ExerciseTemplate[];
-};
-
-function makeId(prefix: string) {
+function makeLocalId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function makeExercise(): ExerciseTemplate {
+function emptyExercise(): ExerciseTemplate {
   return {
-    name: 'Nouvel exercice',
-    muscleGroup: 'AUTRE',
-    grip: '—',
-    targetSets: [
-      { weight: '', reps: '10', rpe: '8' },
-      { weight: '', reps: '10', rpe: '8' },
-      { weight: '', reps: '10', rpe: '8' },
-    ],
+    name: '',
+    muscleGroup: '',
+    grip: '',
+    targetSets: [{ weight: '', reps: '', rpe: '' }],
   };
 }
 
-function makeEmptyDays(): DraftDay[] {
-  return [{ id: makeId('day'), label: 'Jour 1', exercises: [makeExercise()] }];
+function emptyTrainingDay(index: number): ProgramDay {
+  return {
+    id: makeLocalId('day'),
+    label: `Jour ${index + 1}`,
+    isRestDay: false,
+    exercises: [emptyExercise()],
+  };
 }
 
-function cloneDays(days: ProgramDay[]): DraftDay[] {
-  return days.map((day) => ({
-    id: day.id,
-    label: day.label,
-    exercises: day.exercises.map((exercise) => ({
-      ...exercise,
-      targetSets: exercise.targetSets.map((set) => ({ ...set })),
-    })),
-  }));
+function restDay(): ProgramDay {
+  return {
+    id: makeLocalId('repos'),
+    label: 'Repos',
+    isRestDay: true,
+    exercises: [],
+  };
 }
 
 export default function ProgramBuilderScreen() {
   const { state, dispatch } = useAppContext();
-  const editingProgram = state.editingProgramId
-    ? state.programs.find((program) => program.id === state.editingProgramId)
-    : undefined;
-  const isEditing = Boolean(editingProgram);
+  const { editingProgramId, programs } = state;
 
-  const [programName, setProgramName] = useState('');
-  const [days, setDays] = useState<DraftDay[]>(makeEmptyDays);
+  const existingProgram = useMemo(
+    () => programs.find((p) => p.id === editingProgramId) ?? null,
+    [programs, editingProgramId]
+  );
 
-  // Quand l'utilisateur ouvre « Modifier », l'éditeur se remplit avec une copie
-  // indépendante du programme sélectionné. Les changements ne touchent donc pas
-  // le vrai programme avant l'appui sur Enregistrer.
-  useEffect(() => {
-    if (editingProgram) {
-      setProgramName(editingProgram.name);
-      setDays(cloneDays(editingProgram.days));
-    } else {
-      setProgramName('');
-      setDays(makeEmptyDays());
-    }
-  }, [state.editingProgramId]);
+  const [programName, setProgramName] = useState(existingProgram?.name ?? '');
+  const [days, setDays] = useState<ProgramDay[]>(
+    existingProgram ? existingProgram.days.map((d) => ({ ...d, exercises: [...d.exercises] })) : [emptyTrainingDay(0)]
+  );
+  const [expandedDayId, setExpandedDayId] = useState<string | null>(days[0]?.id ?? null);
 
-  const closeBuilder = () => {
+  const goBack = () => {
     dispatch({ type: 'STOP_EDIT_PROGRAM' });
     dispatch({ type: 'NAVIGATE', payload: 'programs' });
   };
 
-  const updateDayLabel = (dayId: string, label: string) => {
-    setDays((current) => current.map((day) => (day.id === dayId ? { ...day, label } : day)));
+  const addTrainingDay = () => {
+    const newDay = emptyTrainingDay(days.length);
+    setDays((prev) => [...prev, newDay]);
+    setExpandedDayId(newDay.id);
   };
 
-  const addDay = () => {
-    setDays((current) => [
-      ...current,
-      { id: makeId('day'), label: `Jour ${current.length + 1}`, exercises: [makeExercise()] },
-    ]);
+  const addRestDay = () => {
+    const newDay = restDay();
+    setDays((prev) => [...prev, newDay]);
   };
 
   const removeDay = (dayId: string) => {
-    if (days.length === 1) {
-      Alert.alert('Un jour minimum', 'Un programme doit contenir au moins un jour.');
+    if (days.length <= 1) {
+      Alert.alert('Impossible', 'Un programme doit contenir au moins un jour.');
       return;
     }
-    setDays((current) => current.filter((day) => day.id !== dayId));
+    setDays((prev) => prev.filter((d) => d.id !== dayId));
   };
 
-  const addExercise = (dayId: string) => {
-    setDays((current) =>
-      current.map((day) =>
-        day.id === dayId ? { ...day, exercises: [...day.exercises, makeExercise()] } : day
-      )
+  const updateDayLabel = (dayId: string, label: string) => {
+    setDays((prev) => prev.map((d) => (d.id === dayId ? { ...d, label } : d)));
+  };
+
+  const toggleExpanded = (dayId: string) => {
+    setExpandedDayId((prev) => (prev === dayId ? null : dayId));
+  };
+
+  const addExerciseToDay = (dayId: string) => {
+    setDays((prev) =>
+      prev.map((d) => (d.id === dayId ? { ...d, exercises: [...d.exercises, emptyExercise()] } : d))
     );
   };
 
-  const removeExercise = (dayId: string, exerciseIndex: number) => {
-    const day = days.find((item) => item.id === dayId);
-    if (day && day.exercises.length === 1) {
-      Alert.alert('Un exercice minimum', 'Chaque jour doit contenir au moins un exercice.');
-      return;
-    }
-    setDays((current) =>
-      current.map((item) =>
-        item.id === dayId
-          ? { ...item, exercises: item.exercises.filter((_, index) => index !== exerciseIndex) }
-          : item
+  const removeExerciseFromDay = (dayId: string, exerciseIndex: number) => {
+    setDays((prev) =>
+      prev.map((d) =>
+        d.id === dayId
+          ? { ...d, exercises: d.exercises.filter((_, i) => i !== exerciseIndex) }
+          : d
       )
     );
   };
@@ -130,18 +116,44 @@ export default function ProgramBuilderScreen() {
   const updateExerciseField = (
     dayId: string,
     exerciseIndex: number,
-    field: 'name' | 'muscleGroup' | 'grip',
+    field: keyof Omit<ExerciseTemplate, 'targetSets'>,
     value: string
   ) => {
-    setDays((current) =>
-      current.map((day) => {
-        if (day.id !== dayId) return day;
-        return {
-          ...day,
-          exercises: day.exercises.map((exercise, index) =>
-            index === exerciseIndex ? { ...exercise, [field]: value } : exercise
-          ),
-        };
+    setDays((prev) =>
+      prev.map((d) => {
+        if (d.id !== dayId) return d;
+        const exercises = d.exercises.map((ex, i) =>
+          i === exerciseIndex ? { ...ex, [field]: value } : ex
+        );
+        return { ...d, exercises };
+      })
+    );
+  };
+
+  const addSetToExercise = (dayId: string, exerciseIndex: number) => {
+    setDays((prev) =>
+      prev.map((d) => {
+        if (d.id !== dayId) return d;
+        const exercises = d.exercises.map((ex, i) =>
+          i === exerciseIndex
+            ? { ...ex, targetSets: [...ex.targetSets, { weight: '', reps: '', rpe: '' }] }
+            : ex
+        );
+        return { ...d, exercises };
+      })
+    );
+  };
+
+  const removeSetFromExercise = (dayId: string, exerciseIndex: number, setIndex: number) => {
+    setDays((prev) =>
+      prev.map((d) => {
+        if (d.id !== dayId) return d;
+        const exercises = d.exercises.map((ex, i) =>
+          i === exerciseIndex
+            ? { ...ex, targetSets: ex.targetSets.filter((_, si) => si !== setIndex) }
+            : ex
+        );
+        return { ...d, exercises };
       })
     );
   };
@@ -153,90 +165,39 @@ export default function ProgramBuilderScreen() {
     field: 'weight' | 'reps' | 'rpe',
     value: string
   ) => {
-    setDays((current) =>
-      current.map((day) => {
-        if (day.id !== dayId) return day;
-        return {
-          ...day,
-          exercises: day.exercises.map((exercise, index) => {
-            if (index !== exerciseIndex) return exercise;
-            return {
-              ...exercise,
-              targetSets: exercise.targetSets.map((set, currentSetIndex) =>
-                currentSetIndex === setIndex ? { ...set, [field]: value } : set
-              ),
-            };
-          }),
-        };
+    setDays((prev) =>
+      prev.map((d) => {
+        if (d.id !== dayId) return d;
+        const exercises = d.exercises.map((ex, i) => {
+          if (i !== exerciseIndex) return ex;
+          const targetSets = ex.targetSets.map((s, si) => (si === setIndex ? { ...s, [field]: value } : s));
+          return { ...ex, targetSets };
+        });
+        return { ...d, exercises };
       })
     );
   };
 
-  const addSet = (dayId: string, exerciseIndex: number) => {
-    setDays((current) =>
-      current.map((day) => {
-        if (day.id !== dayId) return day;
-        return {
-          ...day,
-          exercises: day.exercises.map((exercise, index) =>
-            index === exerciseIndex
-              ? { ...exercise, targetSets: [...exercise.targetSets, { weight: '', reps: '10', rpe: '8' }] }
-              : exercise
-          ),
-        };
-      })
-    );
-  };
-
-  const removeSet = (dayId: string, exerciseIndex: number, setIndex: number) => {
-    const day = days.find((item) => item.id === dayId);
-    const exercise = day?.exercises[exerciseIndex];
-    if (exercise && exercise.targetSets.length === 1) {
-      Alert.alert('Une série minimum', 'Chaque exercice doit contenir au moins une série.');
+  const handleSave = () => {
+    const trimmedName = programName.trim();
+    if (trimmedName.length === 0) {
+      Alert.alert('Nom manquant', 'Donne un nom à ton programme avant de sauvegarder.');
       return;
     }
 
-    setDays((current) =>
-      current.map((item) => {
-        if (item.id !== dayId) return item;
-        return {
-          ...item,
-          exercises: item.exercises.map((itemExercise, index) =>
-            index === exerciseIndex
-              ? { ...itemExercise, targetSets: itemExercise.targetSets.filter((_, currentIndex) => currentIndex !== setIndex) }
-              : itemExercise
-          ),
-        };
-      })
-    );
-  };
-
-  const saveProgram = () => {
-    const name = programName.trim();
-    if (!name) {
-      Alert.alert('Nom manquant', 'Donne un nom à ton programme avant de l’enregistrer.');
+    const trainingDaysWithoutExercise = days.filter((d) => !d.isRestDay && d.exercises.length === 0);
+    if (trainingDaysWithoutExercise.length > 0) {
+      Alert.alert('Jour incomplet', 'Chaque jour d\'entraînement doit contenir au moins un exercice.');
       return;
     }
-
-    const validDays: ProgramDay[] = days.map((day) => ({
-      id: day.id,
-      label: day.label.trim() || 'Jour sans nom',
-      exercises: day.exercises.map((exercise) => ({
-        ...exercise,
-        name: exercise.name.trim() || 'Exercice sans nom',
-        muscleGroup: exercise.muscleGroup.trim().toUpperCase() || 'AUTRE',
-        grip: exercise.grip.trim() || '—',
-      })),
-    }));
 
     const program: Program = {
-      id: editingProgram?.id ?? makeId('program'),
-      name,
-      days: validDays,
+      id: existingProgram?.id ?? makeLocalId('program'),
+      name: trimmedName,
+      days,
     };
 
     dispatch({ type: 'SAVE_PROGRAM', payload: program });
-    dispatch({ type: 'SET_ACTIVE_PROGRAM', payload: program.id });
     dispatch({ type: 'NAVIGATE', payload: 'programs' });
   };
 
@@ -248,161 +209,148 @@ export default function ProgramBuilderScreen() {
         <StatusBar barStyle="light-content" />
 
         <View style={styles.header}>
-          <View>
-            <Text style={styles.headerTitle}>{isEditing ? 'Modifier le programme' : 'Nouveau programme'}</Text>
-            <Text style={styles.headerSubtitle}>
-              {isEditing ? 'Mets à jour tes jours et tes exercices' : 'Construis tes jours et tes exercices'}
-            </Text>
-          </View>
-          <TouchableOpacity onPress={closeBuilder}>
-            <Text style={styles.cancelLink}>Annuler</Text>
+          <TouchableOpacity onPress={goBack} hitSlop={8}>
+            <Text style={styles.backLink}>← Retour</Text>
           </TouchableOpacity>
+          <Text style={styles.headerTitle}>{existingProgram ? 'Modifier le programme' : 'Nouveau programme'}</Text>
         </View>
 
-        <KeyboardAvoidingView
-          style={styles.keyboardArea}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <ScrollView
-            contentContainerStyle={styles.scrollContent}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-          >
-            <View style={styles.pill}>
-              <Text style={styles.fieldLabel}>Nom du programme</Text>
-              <TextInput
-                style={styles.programNameInput}
-                placeholder="Ex. Push / Pull / Legs — Sèche"
-                placeholderTextColor={colors.textMuted}
-                value={programName}
-                onChangeText={setProgramName}
-                returnKeyType="done"
-              />
-            </View>
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          <Text style={styles.sectionLabel}>Nom du programme</Text>
+          <TextInput
+            style={styles.nameInput}
+            value={programName}
+            onChangeText={setProgramName}
+            placeholder="Ex : Sèche — Push/Pull/Legs"
+            placeholderTextColor={colors.textMuted}
+          />
 
-            {days.map((day, dayIndex) => (
-              <View key={day.id} style={styles.dayCard}>
-                <View style={styles.dayHeader}>
-                  <TextInput
-                    style={styles.dayNameInput}
-                    value={day.label}
-                    onChangeText={(value) => updateDayLabel(day.id, value)}
-                    placeholder={`Jour ${dayIndex + 1}`}
-                    placeholderTextColor={colors.textMuted}
-                  />
-                  <TouchableOpacity onPress={() => removeDay(day.id)} hitSlop={8}>
-                    <Text style={styles.removeText}>Supprimer</Text>
+          <Text style={styles.sectionLabel}>Jours du cycle</Text>
+
+          {days.map((day, dayIndex) => (
+            <View key={day.id} style={styles.dayCard}>
+              {day.isRestDay ? (
+                <View style={styles.restDayRow}>
+                  <Text style={styles.restDayLabel}>😴 {day.label}</Text>
+                  <TouchableOpacity onPress={() => removeDay(day.id)}>
+                    <Text style={styles.removeText}>Retirer</Text>
                   </TouchableOpacity>
                 </View>
-
-                {day.exercises.map((exercise, exerciseIndex) => (
-                  <View key={`${day.id}-${exerciseIndex}`} style={styles.exerciseCard}>
-                    <View style={styles.exerciseHeader}>
-                      <Text style={styles.exerciseNumber}>EXERCICE {exerciseIndex + 1}</Text>
-                      <TouchableOpacity onPress={() => removeExercise(day.id, exerciseIndex)} hitSlop={8}>
-                        <Text style={styles.removeText}>×</Text>
-                      </TouchableOpacity>
-                    </View>
-
+              ) : (
+                <>
+                  <TouchableOpacity style={styles.dayHeader} onPress={() => toggleExpanded(day.id)}>
                     <TextInput
-                      style={styles.exerciseNameInput}
-                      value={exercise.name}
-                      onChangeText={(value) => updateExerciseField(day.id, exerciseIndex, 'name', value)}
-                      placeholder="Nom de l'exercice"
+                      style={styles.dayLabelInput}
+                      value={day.label}
+                      onChangeText={(text) => updateDayLabel(day.id, text)}
+                      placeholder={`Jour ${dayIndex + 1}`}
                       placeholderTextColor={colors.textMuted}
                     />
-
-                    <View style={styles.metaRow}>
-                      <TextInput
-                        style={[styles.metaInput, styles.metaInputLeft]}
-                        value={exercise.muscleGroup}
-                        onChangeText={(value) => updateExerciseField(day.id, exerciseIndex, 'muscleGroup', value)}
-                        placeholder="Groupe"
-                        placeholderTextColor={colors.textMuted}
-                      />
-                      <TextInput
-                        style={styles.metaInput}
-                        value={exercise.grip}
-                        onChangeText={(value) => updateExerciseField(day.id, exerciseIndex, 'grip', value)}
-                        placeholder="Prise"
-                        placeholderTextColor={colors.textMuted}
-                      />
+                    <View style={styles.dayHeaderActions}>
+                      <Text style={styles.exerciseCount}>{day.exercises.length} exo</Text>
+                      <TouchableOpacity onPress={() => removeDay(day.id)} hitSlop={8}>
+                        <Text style={styles.removeText}>Retirer</Text>
+                      </TouchableOpacity>
+                      <Text style={styles.chevron}>{expandedDayId === day.id ? '▲' : '▼'}</Text>
                     </View>
+                  </TouchableOpacity>
 
-                    <View style={styles.setHeader}>
-                      <Text style={[styles.setHeaderText, styles.setNumber]}>Série</Text>
-                      <Text style={[styles.setHeaderText, styles.setField]}>Kg</Text>
-                      <Text style={[styles.setHeaderText, styles.setField]}>Reps</Text>
-                      <Text style={[styles.setHeaderText, styles.setField]}>RPE</Text>
-                      <Text style={styles.setDeleteSpacer}>{' '}</Text>
+                  {expandedDayId === day.id && (
+                    <View style={styles.exercisesBlock}>
+                      {day.exercises.map((exercise, exerciseIndex) => (
+                        <View key={exerciseIndex} style={styles.exerciseCard}>
+                          <View style={styles.exerciseHeaderRow}>
+                            <TextInput
+                              style={styles.exerciseNameInput}
+                              value={exercise.name}
+                              onChangeText={(text) => updateExerciseField(day.id, exerciseIndex, 'name', text)}
+                              placeholder="Nom de l'exercice"
+                              placeholderTextColor={colors.textMuted}
+                            />
+                            <TouchableOpacity onPress={() => removeExerciseFromDay(day.id, exerciseIndex)} hitSlop={8}>
+                              <Text style={styles.removeText}>✕</Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <View style={styles.exerciseMetaRow}>
+                            <TextInput
+                              style={styles.metaInput}
+                              value={exercise.muscleGroup}
+                              onChangeText={(text) => updateExerciseField(day.id, exerciseIndex, 'muscleGroup', text)}
+                              placeholder="Groupe musculaire"
+                              placeholderTextColor={colors.textMuted}
+                            />
+                            <TextInput
+                              style={styles.metaInput}
+                              value={exercise.grip}
+                              onChangeText={(text) => updateExerciseField(day.id, exerciseIndex, 'grip', text)}
+                              placeholder="Prise / variante"
+                              placeholderTextColor={colors.textMuted}
+                            />
+                          </View>
+
+                          <Text style={styles.setsLabel}>Séries cibles</Text>
+                          {exercise.targetSets.map((set, setIndex) => (
+                            <View key={setIndex} style={styles.setRow}>
+                              <TextInput
+                                style={styles.setInput}
+                                value={set.weight}
+                                onChangeText={(text) => updateSetField(day.id, exerciseIndex, setIndex, 'weight', text)}
+                                placeholder="kg"
+                                placeholderTextColor={colors.textMuted}
+                                keyboardType="decimal-pad"
+                              />
+                              <TextInput
+                                style={styles.setInput}
+                                value={set.reps}
+                                onChangeText={(text) => updateSetField(day.id, exerciseIndex, setIndex, 'reps', text)}
+                                placeholder="reps"
+                                placeholderTextColor={colors.textMuted}
+                                keyboardType="number-pad"
+                              />
+                              <TextInput
+                                style={styles.setInput}
+                                value={set.rpe}
+                                onChangeText={(text) => updateSetField(day.id, exerciseIndex, setIndex, 'rpe', text)}
+                                placeholder="RPE"
+                                placeholderTextColor={colors.textMuted}
+                                keyboardType="decimal-pad"
+                              />
+                              <TouchableOpacity onPress={() => removeSetFromExercise(day.id, exerciseIndex, setIndex)} hitSlop={8}>
+                                <Text style={styles.removeText}>✕</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+
+                          <TouchableOpacity style={styles.addSetButton} onPress={() => addSetToExercise(day.id, exerciseIndex)}>
+                            <Text style={styles.addSetButtonText}>+ Série</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+
+                      <TouchableOpacity style={styles.addExerciseButton} onPress={() => addExerciseToDay(day.id)}>
+                        <Text style={styles.addExerciseButtonText}>+ Exercice</Text>
+                      </TouchableOpacity>
                     </View>
+                  )}
+                </>
+              )}
+            </View>
+          ))}
 
-                    {exercise.targetSets.map((set, setIndex) => (
-                      <View key={`${day.id}-${exerciseIndex}-${setIndex}`} style={styles.setRow}>
-                        <Text style={[styles.setNumber, styles.setIndex]}>{setIndex + 1}</Text>
-                        <TextInput
-                          style={[styles.setInput, styles.setField]}
-                          value={set.weight}
-                          onChangeText={(value) => updateSetField(day.id, exerciseIndex, setIndex, 'weight', value)}
-                          placeholder="—"
-                          placeholderTextColor={colors.textMuted}
-                          keyboardType="decimal-pad"
-                        />
-                        <TextInput
-                          style={[styles.setInput, styles.setField]}
-                          value={set.reps}
-                          onChangeText={(value) => updateSetField(day.id, exerciseIndex, setIndex, 'reps', value)}
-                          keyboardType="number-pad"
-                        />
-                        <TextInput
-                          style={[styles.setInput, styles.setField]}
-                          value={set.rpe}
-                          onChangeText={(value) => updateSetField(day.id, exerciseIndex, setIndex, 'rpe', value)}
-                          keyboardType="decimal-pad"
-                        />
-                        <TouchableOpacity
-                          style={styles.setDelete}
-                          onPress={() => removeSet(day.id, exerciseIndex, setIndex)}
-                          hitSlop={8}
-                        >
-                          <Text style={styles.setDeleteText}>×</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-
-                    <TouchableOpacity
-                      style={styles.addSetButton}
-                      onPress={() => addSet(day.id, exerciseIndex)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={styles.addSetText}>+ Ajouter une série</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-
-                <TouchableOpacity
-                  style={styles.addExerciseButton}
-                  onPress={() => addExercise(day.id)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.addExerciseText}>+ Ajouter un exercice</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-
-            <TouchableOpacity style={styles.addDayButton} onPress={addDay} activeOpacity={0.8}>
-              <Text style={styles.addDayText}>+ Ajouter un jour</Text>
+          <View style={styles.addDayRow}>
+            <TouchableOpacity style={styles.addDayButton} onPress={addTrainingDay}>
+              <Text style={styles.addDayButtonText}>+ Jour d'entraînement</Text>
             </TouchableOpacity>
-          </ScrollView>
-        </KeyboardAvoidingView>
+            <TouchableOpacity style={styles.addRestDayButton} onPress={addRestDay}>
+              <Text style={styles.addRestDayButtonText}>+ Jour de repos</Text>
+            </TouchableOpacity>
+          </View>
 
-        <View style={styles.footer}>
-          <TouchableOpacity style={styles.saveButton} onPress={saveProgram} activeOpacity={0.85}>
-            <Text style={styles.saveText}>
-              {isEditing ? 'Enregistrer les modifications' : 'Enregistrer le programme'}
-            </Text>
+          <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
+            <Text style={styles.saveButtonText}>Enregistrer le programme</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     </View>
   );
@@ -411,34 +359,29 @@ export default function ProgramBuilderScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
   safe: { flex: 1 },
-  keyboardArea: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  headerTitle: { ...type.h1, color: colors.textPrimary },
-  headerSubtitle: { ...type.caption, color: colors.textSecondary, marginTop: 2 },
-  cancelLink: { ...type.body, color: colors.gold, fontWeight: '600' },
+
+  header: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.sm },
+  backLink: { ...type.bodyStrong, color: colors.gold, marginBottom: spacing.xs },
+  headerTitle: { ...type.display, color: colors.textPrimary },
+
   scrollContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
 
-  pill: {
-    backgroundColor: colors.pill,
+  sectionLabel: {
+    ...type.bodyStrong,
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    fontSize: 12,
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+
+  nameInput: {
     borderWidth: 1,
     borderColor: colors.pillBorder,
-    borderRadius: radius.md,
+    borderRadius: radius.sm,
     padding: spacing.md,
-    marginBottom: spacing.md,
-  },
-  fieldLabel: { ...type.label, color: colors.textMuted, marginBottom: spacing.sm },
-  programNameInput: {
-    ...type.h2,
     color: colors.textPrimary,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.pillBorder,
-    paddingVertical: spacing.sm,
+    backgroundColor: colors.pill,
   },
 
   dayCard: {
@@ -446,97 +389,119 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.pillBorder,
     borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
   },
+
+  restDayRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+  },
+  restDayLabel: { ...type.bodyStrong, color: colors.textPrimary },
+
   dayHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
   },
-  dayNameInput: { ...type.h2, color: colors.textPrimary, flex: 1, paddingVertical: 4 },
-  removeText: { ...type.caption, color: colors.danger, fontWeight: '600', marginLeft: spacing.md },
+  dayLabelInput: { ...type.bodyStrong, color: colors.textPrimary, flex: 1, marginRight: spacing.sm },
+  dayHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  exerciseCount: { ...type.caption, color: colors.textMuted },
+  chevron: { color: colors.textSecondary, fontSize: 12 },
+
+  removeText: { ...type.caption, color: colors.danger },
+
+  exercisesBlock: { paddingHorizontal: spacing.md, paddingBottom: spacing.md },
 
   exerciseCard: {
-    backgroundColor: 'rgba(0,0,0,0.12)',
+    backgroundColor: 'rgba(0,0,0,0.15)',
     borderRadius: radius.sm,
     padding: spacing.md,
     marginBottom: spacing.sm,
   },
-  exerciseHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm },
-  exerciseNumber: { ...type.label, color: colors.gold },
+  exerciseHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
   exerciseNameInput: {
-    ...type.bodyStrong,
+    flex: 1,
     color: colors.textPrimary,
+    ...type.bodyStrong,
     borderBottomWidth: 1,
     borderBottomColor: colors.pillBorder,
-    paddingBottom: spacing.sm,
-    marginBottom: spacing.sm,
+    paddingBottom: 4,
+    marginRight: spacing.sm,
   },
-  metaRow: { flexDirection: 'row', marginBottom: spacing.md },
-  metaInput: {
-    ...type.caption,
-    color: colors.textSecondary,
-    flex: 1,
-    backgroundColor: colors.pill,
-    borderWidth: 1,
-    borderColor: colors.pillBorder,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 7,
-  },
-  metaInputLeft: { marginRight: spacing.sm },
 
-  setHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
-  setHeaderText: { ...type.label, color: colors.textMuted, textAlign: 'center', fontSize: 9 },
-  setRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xs },
-  setNumber: { width: 38, textAlign: 'center' },
-  setIndex: { ...type.bodyStrong, color: colors.textSecondary },
-  setField: { flex: 1 },
-  setInput: {
+  exerciseMetaRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
+  metaInput: {
+    flex: 1,
     ...type.caption,
     color: colors.textPrimary,
-    textAlign: 'center',
-    backgroundColor: colors.pill,
     borderWidth: 1,
     borderColor: colors.pillBorder,
     borderRadius: radius.sm,
-    paddingVertical: 7,
-    marginHorizontal: 2,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
   },
-  setDelete: { width: 26, alignItems: 'center', justifyContent: 'center' },
-  setDeleteSpacer: { width: 26 },
-  setDeleteText: { ...type.h2, color: colors.danger },
-  addSetButton: { alignItems: 'center', paddingTop: spacing.sm },
-  addSetText: { ...type.caption, color: colors.gold, fontWeight: '600' },
+
+  setsLabel: { ...type.caption, color: colors.textMuted, marginBottom: spacing.xs, fontSize: 11 },
+  setRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs },
+  setInput: {
+    flex: 1,
+    ...type.caption,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.pillBorder,
+    borderRadius: radius.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    textAlign: 'center',
+  },
+
+  addSetButton: { alignSelf: 'flex-start', marginTop: spacing.xs },
+  addSetButtonText: { ...type.caption, color: colors.gold },
 
   addExerciseButton: {
     borderWidth: 1,
     borderColor: colors.pillBorder,
-    borderStyle: 'dashed',
     borderRadius: radius.sm,
     paddingVertical: spacing.sm,
     alignItems: 'center',
+    marginTop: spacing.xs,
   },
-  addExerciseText: { ...type.caption, color: colors.textSecondary, fontWeight: '600' },
+  addExerciseButtonText: { ...type.caption, color: colors.textSecondary },
 
+  addDayRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
   addDayButton: {
+    flex: 1,
+    backgroundColor: colors.pill,
     borderWidth: 1,
     borderColor: colors.pillBorder,
-    borderStyle: 'dashed',
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     alignItems: 'center',
   },
-  addDayText: { ...type.bodyStrong, color: colors.textSecondary },
+  addDayButtonText: { ...type.bodyStrong, color: colors.textPrimary, fontSize: 13 },
 
-  footer: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  saveButton: {
-    backgroundColor: colors.ctaBackground,
+  addRestDayButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.pillBorder,
+    borderRadius: radius.md,
     paddingVertical: spacing.md,
-    borderRadius: radius.pill,
     alignItems: 'center',
   },
-  saveText: { ...type.h2, color: colors.ctaText },
+  addRestDayButtonText: { ...type.caption, color: colors.textMuted },
+
+  saveButton: {
+    backgroundColor: colors.gold,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    marginTop: spacing.xl,
+  },
+  saveButtonText: { ...type.bodyStrong, color: '#1a1a1a' },
 });

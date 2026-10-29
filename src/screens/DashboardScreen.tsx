@@ -1,8 +1,11 @@
 // src/screens/DashboardScreen.tsx
-// Dashboard connecté à sessionHistory : tonnage 7j/30j, tendance RPE, dernière séance, régularité.
+// Ajout d'un bandeau sobre "jour de repos" basé sur cyclePosition, avec lien
+// discret vers des conseils de récupération, et bouton pour marquer un repos
+// improvisé même hors planning. Remplace tout le fichier existant.
 
-import React, { useMemo } from 'react';
-import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { Linking, Modal, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, radius, spacing, type } from '../theme/colors';
 import { useAppContext, WorkoutSession } from '../context/AppContext';
 import OneForAllField from '../components/OneForAllField';
@@ -36,9 +39,17 @@ function computeRpeTrend(sessions: WorkoutSession[]): { trend: 'up' | 'down' | '
   return { trend: delta > 0 ? 'up' : 'down', delta };
 }
 
+const RECOVERY_TIPS_URL = 'https://www.passeportsante.net/fr/Actualites/Dossiers/DossierComplexe.aspx?doc=recuperation-musculaire';
+
 export default function DashboardScreen() {
   const { state, dispatch } = useAppContext();
-  const { sessionHistory } = state;
+  const { sessionHistory, programs, activeProgramId, cyclePosition, restLog } = state;
+
+  const [restModalVisible, setRestModalVisible] = useState(false);
+
+  const activeProgram = programs.find((p) => p.id === activeProgramId);
+  const todayDay = activeProgram?.days[cyclePosition] ?? null;
+  const isRestDayToday = todayDay?.isRestDay ?? false;
 
   const stats = useMemo(() => {
     const last7 = sessionHistory.filter((s) => daysAgo(s.date) <= 7);
@@ -62,6 +73,16 @@ export default function DashboardScreen() {
   const goToHistory = () => dispatch({ type: 'NAVIGATE', payload: 'history' });
   const goToPrograms = () => dispatch({ type: 'NAVIGATE', payload: 'programs' });
 
+  const markPlannedRestTaken = () => {
+    dispatch({ type: 'LOG_PLANNED_REST' });
+    setRestModalVisible(false);
+  };
+
+  const markImpromptuRest = () => {
+    dispatch({ type: 'LOG_IMPROMPTU_REST' });
+    setRestModalVisible(false);
+  };
+
   const trendLabel =
     stats.rpeTrend.trend === 'up'
       ? `↑ +${stats.rpeTrend.delta} — fatigue en hausse`
@@ -84,6 +105,21 @@ export default function DashboardScreen() {
             <Text style={styles.greeting}>Plus Ultra</Text>
             <Text style={styles.headerSubtitle}>Ton suivi de progression</Text>
           </View>
+
+          {isRestDayToday && (
+            <View style={styles.restBanner}>
+              <Text style={styles.restBannerText}>Aujourd'hui, c'est repos.</Text>
+              <TouchableOpacity onPress={() => Linking.openURL(RECOVERY_TIPS_URL)}>
+                <Text style={styles.restBannerLink}>Conseils de récupération →</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {!isRestDayToday && (
+            <TouchableOpacity style={styles.impromptuRestLink} onPress={() => setRestModalVisible(true)}>
+              <Text style={styles.impromptuRestText}>Marquer un repos aujourd'hui</Text>
+            </TouchableOpacity>
+          )}
 
           {sessionHistory.length === 0 ? (
             <View style={styles.emptyCard}>
@@ -148,12 +184,31 @@ export default function DashboardScreen() {
                 </TouchableOpacity>
               )}
 
-              <TouchableOpacity style={styles.ctaButton} onPress={goToPrograms}>
-                <Text style={styles.ctaText}>Démarrer une nouvelle séance</Text>
-              </TouchableOpacity>
+              {!isRestDayToday && (
+                <TouchableOpacity style={styles.ctaButton} onPress={goToPrograms}>
+                  <Text style={styles.ctaText}>Démarrer une nouvelle séance</Text>
+                </TouchableOpacity>
+              )}
             </>
           )}
         </ScrollView>
+
+        <Modal visible={restModalVisible} transparent animationType="fade">
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Marquer un repos</Text>
+              <Text style={styles.modalSubtitle}>
+                Aujourd'hui n'est pas un jour de repos prévu à ton programme. Tu veux quand même l'enregistrer ?
+              </Text>
+              <TouchableOpacity style={styles.modalOption} onPress={markImpromptuRest}>
+                <Text style={styles.modalOptionText}>Oui, repos improvisé</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setRestModalVisible(false)} style={styles.modalCancel}>
+                <Text style={styles.modalCancelText}>Annuler</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </View>
   );
@@ -167,6 +222,21 @@ const styles = StyleSheet.create({
   header: { paddingVertical: spacing.md },
   greeting: { ...type.display, color: colors.textPrimary },
   headerSubtitle: { ...type.caption, color: colors.textSecondary, marginTop: 2 },
+
+  restBanner: {
+    borderWidth: 1,
+    borderColor: colors.pillBorder,
+    borderRadius: radius.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  restBannerText: { ...type.caption, color: colors.textSecondary },
+  restBannerLink: { ...type.caption, color: colors.gold, marginTop: 4 },
+
+  impromptuRestLink: { alignSelf: 'flex-start', marginTop: spacing.sm, marginBottom: spacing.xs },
+  impromptuRestText: { ...type.caption, color: colors.textMuted, textDecorationLine: 'underline' },
 
   emptyCard: {
     backgroundColor: colors.pill,
@@ -227,4 +297,13 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
   },
   ctaText: { ...type.bodyStrong, color: '#1a1a1a' },
+
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: spacing.lg },
+  modalCard: { backgroundColor: colors.surface ?? '#1c1c1e', borderRadius: radius.md, padding: spacing.lg },
+  modalTitle: { ...type.h2, color: colors.textPrimary, marginBottom: spacing.sm },
+  modalSubtitle: { ...type.caption, color: colors.textSecondary, marginBottom: spacing.lg },
+  modalOption: { paddingVertical: spacing.md, alignItems: 'center', backgroundColor: colors.gold, borderRadius: radius.sm, marginBottom: spacing.sm },
+  modalOptionText: { ...type.bodyStrong, color: '#1a1a1a' },
+  modalCancel: { paddingVertical: spacing.sm, alignItems: 'center' },
+  modalCancelText: { ...type.bodyStrong, color: colors.textSecondary },
 });
